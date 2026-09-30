@@ -46,9 +46,10 @@ impl SentenceTransformerEmbedder {
     /// Load a model using FastEmbed's initialization options.
     ///
     /// This allows callers to configure execution providers, maximum input
-    /// length, the model cache, and other FastEmbed options.
+    /// length, the model cache, and other FastEmbed options. The embedder's
+    /// [`model_name`](Self::model_name) is the canonical FastEmbed model code.
     pub async fn load_with_options(options: InitOptions) -> Result<Self> {
-        tokio::task::spawn_blocking(move || Self::load_options_blocking(options, None))
+        tokio::task::spawn_blocking(move || Self::load_options_blocking(options))
             .await
             .map_err(|e| Error::engine(format!("embedder load task panicked: {e}")))?
     }
@@ -70,14 +71,22 @@ impl SentenceTransformerEmbedder {
                 ))
             })?;
 
-        Self::load_options_blocking(InitOptions::new(info.model), Some(model_name.to_string()))
+        Self::initialize(
+            InitOptions::new(info.model),
+            model_name.to_string(),
+            info.dim,
+        )
     }
 
-    fn load_options_blocking(options: InitOptions, requested_name: Option<String>) -> Result<Self> {
+    fn load_options_blocking(options: InitOptions) -> Result<Self> {
         let info = TextEmbedding::get_model_info(&options.model_name)
             .map_err(|e| Error::engine(format!("unknown sentence-transformer model: {e}")))?;
-        let model_name = requested_name.unwrap_or_else(|| info.model_code.clone());
+        let model_name = info.model_code.clone();
         let dimension = info.dim;
+        Self::initialize(options, model_name, dimension)
+    }
+
+    fn initialize(options: InitOptions, model_name: String, dimension: usize) -> Result<Self> {
         let model = TextEmbedding::try_new(options)
             .map_err(|e| Error::engine(format!("load embedding model `{model_name}`: {e}")))?;
         Ok(Self {
