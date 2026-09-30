@@ -10,7 +10,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fastembed::{ExecutionProviderDispatch, InitOptions, TextEmbedding};
+use fastembed::TextEmbedding;
+pub use fastembed::{EmbeddingModel, InitOptions};
 
 use crate::error::{Error, Result};
 use crate::resources::schema::{VectorElementType, VectorSchema, VectorSchemaProvider};
@@ -36,25 +37,23 @@ impl SentenceTransformerEmbedder {
     /// Loading downloads and initializes the ONNX model, so it runs on a
     /// blocking thread.
     pub async fn load(model_name: impl Into<String>) -> Result<Self> {
-        Self::load_with_execution_providers(model_name, Vec::new()).await
-    }
-
-    /// Load a model with the specified ONNX Runtime execution providers.
-    /// An empty list uses ONNX Runtime's default CPU provider.
-    pub async fn load_with_execution_providers(
-        model_name: impl Into<String>,
-        execution_providers: Vec<ExecutionProviderDispatch>,
-    ) -> Result<Self> {
         let model_name = model_name.into();
-        tokio::task::spawn_blocking(move || Self::load_blocking(&model_name, execution_providers))
+        tokio::task::spawn_blocking(move || Self::load_blocking(&model_name))
             .await
             .map_err(|e| Error::engine(format!("embedder load task panicked: {e}")))?
     }
 
-    fn load_blocking(
-        model_name: &str,
-        execution_providers: Vec<ExecutionProviderDispatch>,
-    ) -> Result<Self> {
+    /// Load a model using FastEmbed's initialization options.
+    ///
+    /// This allows callers to configure execution providers, maximum input
+    /// length, the model cache, and other FastEmbed options.
+    pub async fn load_with_options(options: InitOptions) -> Result<Self> {
+        tokio::task::spawn_blocking(move || Self::load_options_blocking(options, None))
+            .await
+            .map_err(|e| Error::engine(format!("embedder load task panicked: {e}")))?
+    }
+
+    fn load_blocking(model_name: &str) -> Result<Self> {
         let suffix = |code: &str| code.rsplit('/').next().unwrap_or(code).to_string();
         let wanted_suffix = suffix(model_name);
         let info = TextEmbedding::list_supported_models()
@@ -71,13 +70,19 @@ impl SentenceTransformerEmbedder {
                 ))
             })?;
 
+        Self::load_options_blocking(InitOptions::new(info.model), Some(model_name.to_string()))
+    }
+
+    fn load_options_blocking(options: InitOptions, requested_name: Option<String>) -> Result<Self> {
+        let info = TextEmbedding::get_model_info(&options.model_name)
+            .map_err(|e| Error::engine(format!("unknown sentence-transformer model: {e}")))?;
+        let model_name = requested_name.unwrap_or_else(|| info.model_code.clone());
         let dimension = info.dim;
-        let options = InitOptions::new(info.model).with_execution_providers(execution_providers);
         let model = TextEmbedding::try_new(options)
             .map_err(|e| Error::engine(format!("load embedding model `{model_name}`: {e}")))?;
         Ok(Self {
             model: Arc::new(model),
-            model_name: model_name.to_string(),
+            model_name,
             dimension,
         })
     }
