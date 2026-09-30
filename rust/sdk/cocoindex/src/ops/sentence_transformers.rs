@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fastembed::{InitOptions, TextEmbedding};
+use fastembed::{ExecutionProviderDispatch, InitOptions, TextEmbedding};
 
 use crate::error::{Error, Result};
 use crate::resources::schema::{VectorElementType, VectorSchema, VectorSchemaProvider};
@@ -36,13 +36,25 @@ impl SentenceTransformerEmbedder {
     /// Loading downloads and initializes the ONNX model, so it runs on a
     /// blocking thread.
     pub async fn load(model_name: impl Into<String>) -> Result<Self> {
+        Self::load_with_execution_providers(model_name, Vec::new()).await
+    }
+
+    /// Load a model with the specified ONNX Runtime execution providers.
+    /// An empty list uses ONNX Runtime's default CPU provider.
+    pub async fn load_with_execution_providers(
+        model_name: impl Into<String>,
+        execution_providers: Vec<ExecutionProviderDispatch>,
+    ) -> Result<Self> {
         let model_name = model_name.into();
-        tokio::task::spawn_blocking(move || Self::load_blocking(&model_name))
+        tokio::task::spawn_blocking(move || Self::load_blocking(&model_name, execution_providers))
             .await
             .map_err(|e| Error::engine(format!("embedder load task panicked: {e}")))?
     }
 
-    fn load_blocking(model_name: &str) -> Result<Self> {
+    fn load_blocking(
+        model_name: &str,
+        execution_providers: Vec<ExecutionProviderDispatch>,
+    ) -> Result<Self> {
         let suffix = |code: &str| code.rsplit('/').next().unwrap_or(code).to_string();
         let wanted_suffix = suffix(model_name);
         let info = TextEmbedding::list_supported_models()
@@ -60,7 +72,8 @@ impl SentenceTransformerEmbedder {
             })?;
 
         let dimension = info.dim;
-        let model = TextEmbedding::try_new(InitOptions::new(info.model))
+        let options = InitOptions::new(info.model).with_execution_providers(execution_providers);
+        let model = TextEmbedding::try_new(options)
             .map_err(|e| Error::engine(format!("load embedding model `{model_name}`: {e}")))?;
         Ok(Self {
             model: Arc::new(model),
